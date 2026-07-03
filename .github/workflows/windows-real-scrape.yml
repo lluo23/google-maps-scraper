@@ -1,0 +1,87 @@
+name: Windows 少量真实采集测试
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-scrape:
+    name: Windows 浏览器与少量采集测试
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: 下载仓库代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 构建 Windows EXE
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          go build -trimpath -o dist\google-maps-scraper.exe .
+
+      - name: 安装 Chromium 浏览器
+        shell: powershell
+        env:
+          PLAYWRIGHT_INSTALL_ONLY: "1"
+          DISABLE_TELEMETRY: "1"
+        run: |
+          .\dist\google-maps-scraper.exe 2>&1 | Tee-Object -FilePath dist\playwright-install.log
+          if ($LASTEXITCODE -ne 0) { throw "Chromium 安装失败，退出码：$LASTEXITCODE" }
+
+      - name: 创建少量测试查询
+        shell: powershell
+        run: |
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText((Join-Path $PWD "sample-query.txt"), "Tokyo hot pot restaurant", $utf8NoBom)
+
+      - name: 执行少量真实采集
+        shell: powershell
+        env:
+          DISABLE_TELEMETRY: "1"
+        run: |
+          .\dist\google-maps-scraper.exe `
+            -input sample-query.txt `
+            -results dist\sample-results.csv `
+            -depth 1 `
+            -c 1 `
+            -fast-mode `
+            -exit-on-inactivity 3m 2>&1 | Tee-Object -FilePath dist\scrape.log
+          if ($LASTEXITCODE -ne 0) { throw "真实采集失败，退出码：$LASTEXITCODE" }
+
+      - name: 验证 CSV 结果
+        shell: powershell
+        run: |
+          if (!(Test-Path "dist\sample-results.csv")) { throw "没有生成 CSV 文件" }
+          $file = Get-Item "dist\sample-results.csv"
+          if ($file.Length -lt 100) { throw "CSV 文件过小，可能没有采集到有效数据" }
+          $rows = @(Import-Csv "dist\sample-results.csv")
+          if ($rows.Count -lt 1) { throw "CSV 没有有效商家记录" }
+          Write-Host "采集到的记录数量：$($rows.Count)"
+          $rows | Select-Object -First 5 title, category, address, phone, website |
+            Format-Table -AutoSize | Out-String | Set-Content "dist\sample-preview.txt"
+          Get-FileHash "dist\sample-results.csv" -Algorithm SHA256 |
+            Format-List | Out-File "dist\sample-results-sha256.txt"
+
+      - name: 上传测试结果与日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-maps-real-scrape-test
+          path: |
+            dist/google-maps-scraper.exe
+            dist/sample-results.csv
+            dist/sample-preview.txt
+            dist/sample-results-sha256.txt
+            dist/playwright-install.log
+            dist/scrape.log
+          if-no-files-found: warn
+          retention-days: 7

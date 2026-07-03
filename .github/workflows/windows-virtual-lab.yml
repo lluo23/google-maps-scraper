@@ -1,0 +1,175 @@
+name: Windows 虚拟机修复与真实采集验收
+
+on:
+  push:
+    branches:
+      - develop-page-type-fix
+    paths:
+      - ".github/workflows/windows-virtual-lab.yml"
+      - "scripts/prepare-patched-scrapemate.ps1"
+      - "PROJECT_SOURCE_OF_TRUTH.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-virtual-lab:
+    name: Windows 构建、浏览器与真实采集
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    env:
+      DISABLE_TELEMETRY: "1"
+      GOMAXPROCS: "1"
+
+    steps:
+      - name: 下载正式仓库代码
+        uses: actions/checkout@v4
+
+      - name: 安装固定 Go 版本
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 记录虚拟机环境
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path reports, dist | Out-Null
+          Get-ComputerInfo |
+            Select-Object WindowsProductName, WindowsVersion, OsArchitecture |
+            Format-List | Out-File reports\windows-environment.txt
+          go version | Tee-Object -FilePath reports\go-version.txt
+          git rev-parse HEAD | Tee-Object -FilePath reports\source-commit.txt
+
+      - name: 准备固定依赖修复
+        shell: powershell
+        run: |
+          .\scripts\prepare-patched-scrapemate.ps1 -ProjectRoot $PWD
+          Select-String -Path .\.patched\scrapemate\adapters\fetchers\jshttp\session_slot.go `
+            -Pattern "return p.p.IsClosed|recreateBrowser" `
+            -Context 3,5 |
+            Out-File reports\patched-source-proof.txt
+
+      - name: 校验依赖
+        shell: powershell
+        run: |
+          go mod verify 2>&1 | Out-File reports\go-mod-verify.log
+          if ($LASTEXITCODE -ne 0) { throw "go mod verify failed: $LASTEXITCODE" }
+
+      - name: 单线程运行完整测试
+        shell: powershell
+        run: |
+          $go = (Get-Command go).Source
+          $p = Start-Process -FilePath $go `
+            -ArgumentList @("test", "-p", "1", "./...", "-count=1") `
+            -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput reports\go-test.stdout.log `
+            -RedirectStandardError reports\go-test.stderr.log
+          Get-Content reports\go-test.stdout.log
+          Get-Content reports\go-test.stderr.log
+          if ($p.ExitCode -ne 0) { throw "Go tests failed: $($p.ExitCode)" }
+
+      - name: 构建 Windows EXE
+        shell: powershell
+        run: |
+          $go = (Get-Command go).Source
+          $p = Start-Process -FilePath $go `
+            -ArgumentList @("build", "-p", "1", "-trimpath", "-o", "dist\google-maps-scraper.exe", ".") `
+            -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput reports\go-build.stdout.log `
+            -RedirectStandardError reports\go-build.stderr.log
+          Get-Content reports\go-build.stdout.log
+          Get-Content reports\go-build.stderr.log
+          if ($p.ExitCode -ne 0) { throw "Go build failed: $($p.ExitCode)" }
+          Get-FileHash dist\google-maps-scraper.exe -Algorithm SHA256 |
+            Format-List | Out-File reports\exe-sha256.txt
+          .\dist\google-maps-scraper.exe -version |
+            Tee-Object -FilePath reports\version-output.txt
+          if ($LASTEXITCODE -ne 0) { throw "EXE version smoke test failed: $LASTEXITCODE" }
+
+      - name: 安装 Chromium
+        shell: powershell
+        run: |
+          $env:PLAYWRIGHT_INSTALL_ONLY = "1"
+          $p = Start-Process -FilePath .\dist\google-maps-scraper.exe `
+            -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput reports\playwright-install.stdout.log `
+            -RedirectStandardError reports\playwright-install.stderr.log
+          Remove-Item Env:PLAYWRIGHT_INSTALL_ONLY -ErrorAction SilentlyContinue
+          Get-Content reports\playwright-install.stdout.log
+          Get-Content reports\playwright-install.stderr.log
+          if ($p.ExitCode -ne 0) { throw "Chromium install failed: $($p.ExitCode)" }
+
+      - name: 创建单条公开商家查询
+        shell: powershell
+        run: |
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText(
+            (Join-Path $PWD "sample-query.txt"),
+            "Tokyo hot pot restaurant",
+            $utf8NoBom
+          )
+
+      - name: 执行少量真实采集
+        shell: powershell
+        run: |
+          Remove-Item Env:PLAYWRIGHT_INSTALL_ONLY -ErrorAction SilentlyContinue
+          Remove-Item dist\sample-results.csv -Force -ErrorAction SilentlyContinue
+          $args = @(
+            "-input", "sample-query.txt",
+            "-results", "dist\sample-results.csv",
+            "-depth", "1",
+            "-c", "1",
+            "-browser-pool-size", "1",
+            "-pages-per-browser", "1",
+            "-disable-page-reuse",
+            "-exit-on-inactivity", "3m"
+          )
+          $p = Start-Process -FilePath .\dist\google-maps-scraper.exe `
+            -ArgumentList $args `
+            -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput reports\real-scrape.stdout.log `
+            -RedirectStandardError reports\real-scrape.stderr.log
+          Get-Content reports\real-scrape.stdout.log
+          Get-Content reports\real-scrape.stderr.log
+          "exit_code=$($p.ExitCode)" | Out-File reports\real-scrape-exit-code.txt
+
+      - name: 验证真实 CSV 数据
+        shell: powershell
+        run: |
+          if (!(Test-Path "dist\sample-results.csv")) {
+            throw "No CSV file was generated"
+          }
+          $file = Get-Item "dist\sample-results.csv"
+          if ($file.Length -lt 100) {
+            throw "CSV is too small: $($file.Length) bytes"
+          }
+          $rows = @(Import-Csv "dist\sample-results.csv")
+          if ($rows.Count -lt 1) {
+            throw "CSV contains no business rows"
+          }
+          "row_count=$($rows.Count)" | Tee-Object -FilePath reports\real-scrape-summary.txt
+          $rows |
+            Select-Object -First 5 title, category, address, phone, website, latitude, longitude |
+            Format-Table -AutoSize |
+            Out-String |
+            Set-Content reports\sample-preview.txt
+          Get-FileHash "dist\sample-results.csv" -Algorithm SHA256 |
+            Format-List |
+            Out-File reports\sample-results-sha256.txt
+
+      - name: 上传完整验收证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-virtual-lab-evidence
+          path: |
+            reports/
+            dist/google-maps-scraper.exe
+            dist/sample-results.csv
+            .patched/scrapemate/adapters/fetchers/jshttp/session_slot.go
+            PROJECT_SOURCE_OF_TRUTH.json
+          if-no-files-found: warn
+          retention-days: 7

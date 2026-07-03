@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "project_name": "Google Maps public business scraper - Windows baseline",
+  "official_repository": "lluo23/google-maps-scraper",
+  "official_source_path_windows": "D:\\地图采集器",
+  "official_branch": "main",
+  "development_branch": "develop-page-type-fix",
+  "base_commit": "e9b1e75e7bf2d33db38dc151f316180b2712a090",
+  "current_stable_version": null,
+  "official_entrypoint": "dist\\google-maps-scraper.exe",
+  "last_real_acceptance_date": null,
+  "test_report_location": "GitHub Actions artifact: windows-virtual-lab-evidence",
+  "release_artifact_location": null,
+  "release_sha256": null,
+  "status": "development",
+  "verified_facts": [
+    "Go 1.26.4 dependency verification passed on the user's Windows computer",
+    "Single-threaded Go test suite passed on the user's Windows computer",
+    "Windows EXE build and -version smoke test passed on the user's Windows computer",
+    "Playwright Chromium installation passed on the user's Windows computer",
+    "Manual Chromium access to the Google Maps result page passed"
+  ],
+  "known_blocker": {
+    "error": "unexpected page type",
+    "root_cause": "github.com/gosom/scrapemate v1.2.1 session recovery can return a nil page with nil error after recreating the browser; its playwrightPage.isClosed implementation is also inverted",
+    "fix_strategy": "Pin v1.2.1, create an isolated patched copy during CI, fix both defects, run full Windows regression and require a non-empty real CSV before acceptance"
+  },
+  "release_gate": [
+    "All Go tests pass",
+    "Windows EXE builds and starts",
+    "Chromium installs",
+    "One real public-business query produces at least one CSV row",
+    "Logs, hashes and artifacts are uploaded",
+    "Fresh extracted package passes the documented startup flow"
+  ]
+}

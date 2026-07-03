@@ -1,0 +1,68 @@
+name: Windows 构建与基础测试
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-smoke:
+    name: Windows 真实构建与基础测试
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 下载仓库代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 显示运行环境
+        shell: powershell
+        run: |
+          Get-ComputerInfo |
+            Select-Object WindowsProductName, WindowsVersion, OsArchitecture
+          go version
+
+      - name: 下载并校验依赖
+        shell: powershell
+        run: |
+          go mod download
+          go mod verify
+
+      - name: 运行自动测试
+        shell: powershell
+        env:
+          DISABLE_TELEMETRY: "1"
+        run: |
+          go test ./... -count=1
+
+      - name: 构建 Windows 程序
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          go build -trimpath -o dist\google-maps-scraper.exe .
+
+      - name: 运行程序基础测试
+        shell: powershell
+        env:
+          DISABLE_TELEMETRY: "1"
+        run: |
+          .\dist\google-maps-scraper.exe -version |
+            Tee-Object -FilePath dist\version-output.txt
+
+          Get-FileHash .\dist\google-maps-scraper.exe -Algorithm SHA256 |
+            Format-List |
+            Out-File dist\sha256.txt
+
+      - name: 上传 Windows 成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-maps-scraper-windows-test
+          path: dist
+          retention-days: 7

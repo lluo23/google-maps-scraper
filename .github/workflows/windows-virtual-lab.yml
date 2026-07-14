@@ -6,7 +6,10 @@ on:
       - develop-page-type-fix
     paths:
       - ".github/workflows/windows-virtual-lab.yml"
+      - "go.mod"
+      - "go.sum"
       - "patches/scrapemate/**"
+      - "runner/installplaywright/**"
       - "scripts/prepare-patched-scrapemate.ps1"
       - "PROJECT_SOURCE_OF_TRUTH.json"
   workflow_dispatch:
@@ -29,13 +32,15 @@ jobs:
     env:
       DISABLE_TELEMETRY: "1"
       GOMAXPROCS: "1"
+      PLAYWRIGHT_DRIVER_PATH: ${{ github.workspace }}\.playwright\driver
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\.playwright\browsers
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install pinned Go version
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -110,6 +115,18 @@ jobs:
           Get-Content reports\playwright-install.stdout.log
           Get-Content reports\playwright-install.stderr.log
           if ($p.ExitCode -ne 0) { throw "Chromium install failed: $($p.ExitCode)" }
+          $driverCli = Join-Path $env:PLAYWRIGHT_DRIVER_PATH "package\cli.js"
+          if (!(Test-Path -LiteralPath $driverCli)) {
+            throw "Playwright driver is missing: $driverCli"
+          }
+          $browserDirs = @(Get-ChildItem -Directory -LiteralPath $env:PLAYWRIGHT_BROWSERS_PATH)
+          if ($browserDirs.Count -lt 1) {
+            throw "Playwright installed no browser directories"
+          }
+          "driver_cli=$driverCli" | Out-File reports\playwright-install-proof.txt
+          "browser_directory_count=$($browserDirs.Count)" |
+            Out-File reports\playwright-install-proof.txt -Append
+          $browserDirs.FullName | Out-File reports\playwright-install-proof.txt -Append
 
       - name: Create one public business query
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_real_scrape }}
@@ -175,7 +192,7 @@ jobs:
 
       - name: Upload verification evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-virtual-lab-evidence
           path: |

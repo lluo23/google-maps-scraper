@@ -7,6 +7,9 @@ Set-StrictMode -Version Latest
 
 $modulePath = 'github.com/gosom/scrapemate'
 $moduleVersion = 'v1.2.1'
+$legacyPlaywrightModule = 'github.com/playwright-community/playwright-go'
+$playwrightModule = 'github.com/mxschmitt/playwright-go'
+$playwrightVersion = 'v0.6100.0'
 $patchRoot = Join-Path $ProjectRoot '.patched'
 $targetRoot = Join-Path $patchRoot 'scrapemate'
 $reportDir = Join-Path $ProjectRoot 'reports'
@@ -14,6 +17,7 @@ $patchTestSource = Join-Path $ProjectRoot 'patches\scrapemate\testdata\session_s
 $patchTestTarget = Join-Path $targetRoot 'adapters\fetchers\jshttp\session_slot_recovery_patch_test.go'
 $testStdout = Join-Path $reportDir 'scrapemate-patch-test.stdout.log'
 $testStderr = Join-Path $reportDir 'scrapemate-patch-test.stderr.log'
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 New-Item -ItemType Directory -Force -Path $patchRoot, $reportDir | Out-Null
 Remove-Item -LiteralPath $targetRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -36,6 +40,55 @@ if (-not $downloadJson.Dir) {
 New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
 Copy-Item -Path (Join-Path $downloadJson.Dir '*') -Destination $targetRoot -Recurse -Force
 & attrib -R (Join-Path $targetRoot '*') /S /D | Out-Null
+
+$playwrightImportFiles = @(
+    'adapters\browsers\playwright\page.go'
+    'adapters\fetchers\jshttp\jshttp.go'
+    'adapters\fetchers\jshttp\page_slot_pool.go'
+    'adapters\fetchers\jshttp\session_slot.go'
+)
+$legacyImport = '"' + $legacyPlaywrightModule + '"'
+$replacementImport = '"' + $playwrightModule + '"'
+
+foreach ($relativePath in $playwrightImportFiles) {
+    $file = Join-Path $targetRoot $relativePath
+    if (-not (Test-Path -LiteralPath $file)) {
+        throw "Expected Playwright import file is missing: $file"
+    }
+
+    $content = [System.IO.File]::ReadAllText($file)
+    $matches = [regex]::Matches($content, [regex]::Escape($legacyImport))
+    if ($matches.Count -ne 1) {
+        throw "Expected one legacy Playwright import in $file, found $($matches.Count)"
+    }
+
+    [System.IO.File]::WriteAllText(
+        $file,
+        $content.Replace($legacyImport, $replacementImport),
+        $utf8NoBom
+    )
+}
+
+Push-Location $targetRoot
+try {
+    & go mod edit "-droprequire=$legacyPlaywrightModule"
+    if ($LASTEXITCODE -ne 0) {
+        throw "dropping legacy Playwright from patched scrapemate failed: $LASTEXITCODE"
+    }
+
+    & go mod edit "-require=$playwrightModule@$playwrightVersion"
+    if ($LASTEXITCODE -ne 0) {
+        throw "pinning Playwright in patched scrapemate failed: $LASTEXITCODE"
+    }
+
+    & go mod download "$playwrightModule@$playwrightVersion"
+    if ($LASTEXITCODE -ne 0) {
+        throw "downloading Playwright for patched scrapemate failed: $LASTEXITCODE"
+    }
+}
+finally {
+    Pop-Location
+}
 
 $sessionSlotFile = Join-Path $targetRoot 'adapters\fetchers\jshttp\session_slot.go'
 if (-not (Test-Path -LiteralPath $sessionSlotFile)) {
@@ -67,7 +120,6 @@ $recoveryReplacement = @"
 "@
 $source = [regex]::Replace($source, $recoveryPattern, $recoveryReplacement, 1)
 
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($sessionSlotFile, $source, $utf8NoBom)
 Copy-Item -LiteralPath $patchTestSource -Destination $patchTestTarget -Force
 
@@ -107,6 +159,16 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "go mod edit failed with exit code $LASTEXITCODE"
     }
+
+    & go mod edit "-droprequire=$legacyPlaywrightModule"
+    if ($LASTEXITCODE -ne 0) {
+        throw "dropping legacy Playwright from the root module failed: $LASTEXITCODE"
+    }
+
+    & go mod edit "-require=$playwrightModule@$playwrightVersion"
+    if ($LASTEXITCODE -ne 0) {
+        throw "pinning Playwright in the root module failed: $LASTEXITCODE"
+    }
 }
 finally {
     Pop-Location
@@ -115,6 +177,9 @@ finally {
 $proof = @(
     "module=$modulePath"
     "version=$moduleVersion"
+    "playwright_module=$playwrightModule"
+    "playwright_version=$playwrightVersion"
+    "migrated_playwright_imports=$($playwrightImportFiles.Count)"
     "source_dir=$($downloadJson.Dir)"
     "patched_dir=$targetRoot"
     "fixed_is_closed=true"
